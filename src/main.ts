@@ -124,7 +124,7 @@ app.innerHTML = `
       <input type="checkbox" id="trails" checked />
       Trails
     </label>
-    <div class="hint">Mouse / W-S / G / Space / Enter</div>
+    <div class="hint">Drag to move • Tap resume • Double-tap pause • G / Space / Enter</div>
   </div>
 `
 
@@ -142,6 +142,8 @@ const postSummary = document.querySelector<HTMLParagraphElement>('#postSummary')
 const postXp = document.querySelector<HTMLParagraphElement>('#postXp')
 const postUnlocks = document.querySelector<HTMLParagraphElement>('#postUnlocks')
 const rematchBtn = document.querySelector<HTMLButtonElement>('#rematchBtn')
+const hud = document.querySelector<HTMLDivElement>('.hud')
+const settingsUi = document.querySelector<HTMLDivElement>('.ui')
 
 if (!canvas || !difficultySelect || !muteToggle || !trailsToggle) {
   throw new Error('Required UI elements are missing')
@@ -344,6 +346,9 @@ let splashTime = 0
 let mouseY: number | null = null
 let mouseAssistTimer = 0
 const keys = new Set<string>()
+let activeTouchPointerId: number | null = null
+const activeTouchIds = new Set<number>()
+let mobileControlMode = window.matchMedia('(pointer: coarse)').matches || window.innerWidth <= 900
 
 const gravityWells: GravityWell[] = [
   { x: 0, y: 0, strength: 5000000, softening: 3000 },
@@ -353,6 +358,12 @@ const gravityWells: GravityWell[] = [
 const showToast = (message: string, duration = 1.8) => {
   toastText = message
   toastTimer = duration
+}
+
+const syncOverlayVisibility = () => {
+  const showOverlay = gameState === 'paused' || gameState === 'postmatch'
+  hud?.classList.toggle('hidden-ui', !showOverlay)
+  settingsUi?.classList.toggle('hidden-ui', !showOverlay)
 }
 
 const updateHud = () => {
@@ -405,6 +416,7 @@ const updateWellPositions = () => {
 const resize = () => {
   gameWidth = window.innerWidth
   gameHeight = window.innerHeight
+  mobileControlMode = window.matchMedia('(pointer: coarse)').matches || window.innerWidth <= 900
   const dpr = Math.min(window.devicePixelRatio || 1, 2)
   canvas.width = Math.floor(gameWidth * dpr)
   canvas.height = Math.floor(gameHeight * dpr)
@@ -461,12 +473,14 @@ const startMatch = () => {
   startServe(1)
   gameState = 'playing'
   showToast(`New modifier: ${activeModifier}`)
+  syncOverlayVisibility()
   updateHud()
 }
 
 const startPausedGame = () => {
   startMatch()
   gameState = 'paused'
+  syncOverlayVisibility()
 }
 
 const togglePause = () => {
@@ -475,10 +489,12 @@ const togglePause = () => {
   } else if (gameState === 'paused') {
     gameState = 'playing'
   }
+  syncOverlayVisibility()
 }
 
 const endMatch = (winner: 'player' | 'ai') => {
   gameState = 'postmatch'
+  syncOverlayVisibility()
   const xpGain = 28 + playerScore * 8 + bestRally * 4 + (winner === 'player' ? 36 : 14)
   const progressResult = gainXP(xpGain)
   updateHud()
@@ -895,9 +911,17 @@ const renderPause = () => {
   ctx.font = '600 28px "Space Grotesk", sans-serif'
   ctx.textAlign = 'center'
   ctx.fillText('Paused', gameWidth / 2, gameHeight * 0.5)
-  ctx.fillStyle = 'rgba(255,255,255,0.7)'
-  ctx.font = '400 14px "Fira Sans", sans-serif'
-  ctx.fillText('Press Space to Resume', gameWidth / 2, gameHeight * 0.56)
+  ctx.fillStyle = 'rgba(255,255,255,0.82)'
+  ctx.font = '500 14px "Fira Sans", sans-serif'
+  if (mobileControlMode) {
+    ctx.fillText('Tap to Resume', gameWidth / 2, gameHeight * 0.56)
+    ctx.fillText('Drag finger up/down to move paddle', gameWidth / 2, gameHeight * 0.60)
+    ctx.fillText('Two-finger tap to Pause during play', gameWidth / 2, gameHeight * 0.64)
+  } else {
+    ctx.fillText('Press Space to Resume', gameWidth / 2, gameHeight * 0.56)
+    ctx.fillText('Mouse or W/S (Arrow keys) to move paddle', gameWidth / 2, gameHeight * 0.60)
+    ctx.fillText('Press G to toggle gravity', gameWidth / 2, gameHeight * 0.64)
+  }
 }
 
 const render = () => {
@@ -1015,6 +1039,72 @@ canvas.addEventListener('mouseleave', () => {
   mouseY = null
 })
 
+canvas.addEventListener('pointerdown', (event) => {
+  ensureAudio()
+
+  if (event.pointerType === 'touch') {
+    activeTouchIds.add(event.pointerId)
+    if (activeTouchPointerId === null) {
+      activeTouchPointerId = event.pointerId
+      mouseY = event.clientY
+      mouseAssistTimer = 0.5
+    }
+  }
+
+  if (gameState === 'splash') {
+    splashTime = Math.max(splashTime, splashConfig.animDuration + splashConfig.pauseDuration)
+    return
+  }
+
+  if (gameState === 'postmatch') {
+    return
+  }
+
+  if (gameState === 'paused') {
+    gameState = 'playing'
+    syncOverlayVisibility()
+    return
+  }
+
+  if (gameState === 'playing') {
+    if (event.pointerType === 'touch' && activeTouchIds.size >= 2) {
+      gameState = 'paused'
+      syncOverlayVisibility()
+      showToast('Paused')
+    }
+  }
+})
+
+canvas.addEventListener('pointermove', (event) => {
+  if (event.pointerType === 'touch') {
+    if (activeTouchPointerId !== event.pointerId || gameState !== 'playing') return
+    mouseY = event.clientY
+    mouseAssistTimer = 0.5
+  }
+})
+
+canvas.addEventListener('pointerup', (event) => {
+  if (event.pointerType === 'touch') {
+    activeTouchIds.delete(event.pointerId)
+    if (activeTouchPointerId === event.pointerId) {
+      activeTouchPointerId = null
+      mouseY = null
+      mouseAssistTimer = 0
+    }
+  }
+})
+
+canvas.addEventListener('pointercancel', (event) => {
+  if (event.pointerType === 'touch') {
+    activeTouchIds.delete(event.pointerId)
+    if (activeTouchPointerId === event.pointerId) {
+      activeTouchPointerId = null
+      mouseY = null
+      mouseAssistTimer = 0
+    }
+  }
+})
+
 window.addEventListener('keydown', (event) => {
   keys.add(event.code)
 
@@ -1047,13 +1137,6 @@ window.addEventListener('keyup', (event) => {
   keys.delete(event.code)
 })
 
-window.addEventListener('pointerdown', () => {
-  ensureAudio()
-  if (gameState === 'splash') {
-    splashTime = Math.max(splashTime, splashConfig.animDuration + splashConfig.pauseDuration)
-  }
-})
-
 if (rematchBtn) {
   rematchBtn.addEventListener('click', () => {
     if (postMatch) postMatch.classList.add('hidden')
@@ -1063,5 +1146,6 @@ if (rematchBtn) {
 
 resize()
 resetBall(serveDirection)
+syncOverlayVisibility()
 updateHud()
 requestAnimationFrame(loop)
