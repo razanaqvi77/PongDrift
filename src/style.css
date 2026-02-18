@@ -106,6 +106,10 @@ canvas {
   transform: translate(-50%, 0);
 }
 
+.hidden-ui {
+  display: none !important;
+}
+
 .ui {
   position: fixed;
   bottom: 18px;
