@@ -11,6 +11,10 @@ A fast-paced browser Pong variant built with TypeScript + Vite, featuring gravit
   - `Big Ball`: larger ball size for more chaotic rallies.
   - `Sticky Paddle`: brief contact hold before release.
   - `Ion Wind`: horizontal wind oscillation changes ball pace.
+  - `Twin Orbit`: a second ball activates after sustained rallies.
+  - `Drifting Wells`: gravity wells drift across the arena over time.
+  - `Gravity Pulse`: a rotating pulse force periodically shoves the ball.
+  - `Ghost Ball`: the ball phases to low visibility in timed intervals.
 - Game-feel improvements:
   - Particle bursts on collisions and scoring.
   - Screen shake and score pulse.
