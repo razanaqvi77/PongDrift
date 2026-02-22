@@ -31,7 +31,15 @@ type Difficulty = {
 }
 
 type GameState = 'splash' | 'playing' | 'paused' | 'postmatch'
-type MatchModifier = 'Curve Drift' | 'Big Ball' | 'Sticky Paddle' | 'Ion Wind'
+type MatchModifier =
+  | 'Curve Drift'
+  | 'Big Ball'
+  | 'Sticky Paddle'
+  | 'Ion Wind'
+  | 'Twin Orbit'
+  | 'Drifting Wells'
+  | 'Gravity Pulse'
+  | 'Ghost Ball'
 
 type Particle = {
   x: number
@@ -56,7 +64,11 @@ type Progression = {
   xp: number
 }
 
-const TARGET_SCORE = 7
+const SCORE_LIMITS = {
+  min: 5,
+  max: 20,
+  default: 10,
+}
 const PROGRESSION_KEY = 'pongdrift_progress_v1'
 const XP_PER_LEVEL = 140
 
@@ -116,6 +128,10 @@ app.innerHTML = `
         <option value="Hard">Hard</option>
       </select>
     </label>
+    <label>
+      Target Score
+      <select id="targetScore"></select>
+    </label>
     <label class="toggle">
       <input type="checkbox" id="mute" />
       Mute
@@ -130,6 +146,7 @@ app.innerHTML = `
 
 const canvas = document.querySelector<HTMLCanvasElement>('#game')
 const difficultySelect = document.querySelector<HTMLSelectElement>('#difficulty')
+const targetScoreSelect = document.querySelector<HTMLSelectElement>('#targetScore')
 const muteToggle = document.querySelector<HTMLInputElement>('#mute')
 const trailsToggle = document.querySelector<HTMLInputElement>('#trails')
 const modifierBadge = document.querySelector<HTMLDivElement>('#modifierBadge')
@@ -145,7 +162,7 @@ const rematchBtn = document.querySelector<HTMLButtonElement>('#rematchBtn')
 const hud = document.querySelector<HTMLDivElement>('.hud')
 const settingsUi = document.querySelector<HTMLDivElement>('.ui')
 
-if (!canvas || !difficultySelect || !muteToggle || !trailsToggle) {
+if (!canvas || !difficultySelect || !targetScoreSelect || !muteToggle || !trailsToggle) {
   throw new Error('Required UI elements are missing')
 }
 const ctx = canvas.getContext('2d')
@@ -153,10 +170,51 @@ if (!ctx) {
   throw new Error('2D context not available')
 }
 
+const BALANCE = {
+  twinOrbitRallyThreshold: 3,
+  difficulty: {
+    Easy: { reactionMs: 180, maxSpeed: 380, errorPx: 40 },
+    Challenging: { reactionMs: 96, maxSpeed: 590, errorPx: 16 },
+    Hard: { reactionMs: 62, maxSpeed: 760, errorPx: 8 },
+  },
+  ai: {
+    errorScale: { Easy: 1, Challenging: 0.75, Hard: 0.55 },
+    rallyErrorPerHit: 0.03,
+    maxRallyErrorBoost: 0.5,
+    speedBoostCap: { Easy: 0, Challenging: 0.18, Hard: 0.28 },
+    speedBoostPerHit: 0.015,
+    trackingGain: 2.8,
+    smoothing: 8,
+  },
+  rallySpeedRamp: {
+    perHit: 0.008,
+    maxRate: 0.04,
+    mainBallMaxSpeed: 1100,
+    orbitBallMaxSpeed: 1080,
+  },
+  driftingWells: {
+    xAmplitudeRatio: 0.09,
+    yAmplitudeRatio: 0.12,
+    xSpeed: 0.52,
+    ySpeed: 0.38,
+  },
+  gravityPulse: {
+    force: 175,
+    frequency: 2.4,
+    rotationSpeed: 0.9,
+  },
+  ghostBall: {
+    cycle: 2.8,
+    hiddenDuration: 0.95,
+    fadeDuration: 0.2,
+    minAlpha: 0.18,
+  },
+} as const
+
 const difficultyPresets: Record<string, Difficulty> = {
-  Easy: { name: 'Easy', reactionMs: 180, maxSpeed: 380, errorPx: 40 },
-  Challenging: { name: 'Challenging', reactionMs: 120, maxSpeed: 520, errorPx: 22 },
-  Hard: { name: 'Hard', reactionMs: 80, maxSpeed: 680, errorPx: 10 },
+  Easy: { name: 'Easy', ...BALANCE.difficulty.Easy },
+  Challenging: { name: 'Challenging', ...BALANCE.difficulty.Challenging },
+  Hard: { name: 'Hard', ...BALANCE.difficulty.Hard },
 }
 
 const splashConfig = {
@@ -219,10 +277,25 @@ const gainXP = (amount: number) => {
 }
 
 let currentDifficulty = difficultyPresets.Challenging
+let targetScore = SCORE_LIMITS.default
 let trailsEnabled = true
 let gravityEnabled = true
 let activeModifier: MatchModifier = 'Curve Drift'
 let lastModifier: MatchModifier | null = null
+
+const clampTargetScore = (value: number) => clamp(Math.round(value), SCORE_LIMITS.min, SCORE_LIMITS.max)
+
+const setupTargetScoreOptions = () => {
+  if (!targetScoreSelect) return
+  targetScoreSelect.innerHTML = ''
+  for (let score = SCORE_LIMITS.min; score <= SCORE_LIMITS.max; score += 1) {
+    const option = document.createElement('option')
+    option.value = String(score)
+    option.textContent = String(score)
+    if (score === targetScore) option.selected = true
+    targetScoreSelect.append(option)
+  }
+}
 
 const audioState = {
   ctx: null as AudioContext | null,
@@ -304,6 +377,7 @@ const ai: Paddle = {
 }
 
 const baseBallSpeed = 560
+const twinOrbitRallyThreshold = BALANCE.twinOrbitRallyThreshold
 const ball: Ball = {
   x: gameWidth / 2,
   y: gameHeight / 2,
@@ -311,8 +385,17 @@ const ball: Ball = {
   vy: 0,
   radius: 9,
 }
+const orbitBall: Ball = {
+  x: gameWidth / 2,
+  y: gameHeight / 2,
+  vx: -baseBallSpeed,
+  vy: 0,
+  radius: 8,
+}
+let orbitBallActive = false
 
 const trail: Array<{ x: number; y: number }> = []
+const orbitTrail: Array<{ x: number; y: number }> = []
 const particles: Particle[] = []
 
 let playerScore = 0
@@ -399,18 +482,40 @@ const spawnParticles = (x: number, y: number, count: number, speed: number, colo
 }
 
 const chooseModifier = (): MatchModifier => {
-  const modifiers: MatchModifier[] = ['Curve Drift', 'Big Ball', 'Sticky Paddle', 'Ion Wind']
+  const modifiers: MatchModifier[] = [
+    'Curve Drift',
+    'Big Ball',
+    'Sticky Paddle',
+    'Ion Wind',
+    'Twin Orbit',
+    'Drifting Wells',
+    'Gravity Pulse',
+    'Ghost Ball',
+  ]
   const filtered = modifiers.filter((modifier) => modifier !== lastModifier)
   const picked = filtered[Math.floor(Math.random() * filtered.length)]
   lastModifier = picked
   return picked
 }
 
-const updateWellPositions = () => {
-  gravityWells[0].x = gameWidth * 0.32
-  gravityWells[0].y = gameHeight * 0.38
-  gravityWells[1].x = gameWidth * 0.68
-  gravityWells[1].y = gameHeight * 0.62
+const updateWellPositions = (clock = modifierClock) => {
+  const baseA = { x: gameWidth * 0.32, y: gameHeight * 0.38 }
+  const baseB = { x: gameWidth * 0.68, y: gameHeight * 0.62 }
+
+  if (activeModifier === 'Drifting Wells' && gameState === 'playing') {
+    const xAmp = gameWidth * BALANCE.driftingWells.xAmplitudeRatio
+    const yAmp = gameHeight * BALANCE.driftingWells.yAmplitudeRatio
+    gravityWells[0].x = baseA.x + Math.sin(clock * BALANCE.driftingWells.xSpeed) * xAmp
+    gravityWells[0].y = baseA.y + Math.cos(clock * BALANCE.driftingWells.ySpeed) * yAmp
+    gravityWells[1].x = baseB.x + Math.cos(clock * BALANCE.driftingWells.xSpeed * 1.08 + 1.2) * xAmp
+    gravityWells[1].y = baseB.y + Math.sin(clock * BALANCE.driftingWells.ySpeed * 1.12 + 0.8) * yAmp
+    return
+  }
+
+  gravityWells[0].x = baseA.x
+  gravityWells[0].y = baseA.y
+  gravityWells[1].x = baseB.x
+  gravityWells[1].y = baseB.y
 }
 
 const resize = () => {
@@ -432,13 +537,24 @@ const resize = () => {
   updateWellPositions()
 }
 
-const resetBall = (direction: 1 | -1) => {
-  ball.x = gameWidth / 2
-  ball.y = gameHeight / 2
+const resetBall = (targetBall: Ball, direction: 1 | -1) => {
+  targetBall.x = gameWidth / 2
+  targetBall.y = gameHeight / 2
   const angle = (Math.random() * 0.52 - 0.26) * Math.PI
-  ball.vx = Math.cos(angle) * baseBallSpeed * direction
-  ball.vy = Math.sin(angle) * baseBallSpeed
-  ball.radius = activeModifier === 'Big Ball' ? 13 : 9
+  targetBall.vx = Math.cos(angle) * baseBallSpeed * direction
+  targetBall.vy = Math.sin(angle) * baseBallSpeed
+  targetBall.radius = activeModifier === 'Big Ball' ? 13 : 9
+}
+
+const spawnOrbitBall = () => {
+  orbitBallActive = true
+  orbitTrail.length = 0
+  const direction: 1 | -1 = ball.vx >= 0 ? -1 : 1
+  resetBall(orbitBall, direction)
+  orbitBall.radius = 8
+  orbitBall.vx *= 0.97
+  orbitBall.vy *= 0.97
+  showToast('Twin Orbit online!')
 }
 
 const startServe = (direction: 1 | -1) => {
@@ -446,14 +562,19 @@ const startServe = (direction: 1 | -1) => {
   serveTimer = 0.55
   stickyTimer = 0
   stickyPaddle = null
-  resetBall(direction)
+  orbitBallActive = false
+  orbitTrail.length = 0
+  resetBall(ball, direction)
 }
 
 const applyModifierSetup = () => {
   modifierClock = 0
   stickyTimer = 0
   stickyPaddle = null
+  orbitBallActive = false
+  orbitTrail.length = 0
   ball.radius = activeModifier === 'Big Ball' ? 13 : 9
+  updateWellPositions(0)
 }
 
 const startMatch = () => {
@@ -511,7 +632,7 @@ const endMatch = (winner: 'player' | 'ai') => {
   }
 }
 
-const scorePoint = (scorer: 'player' | 'ai') => {
+const scorePoint = (scorer: 'player' | 'ai', scoringBall: Ball) => {
   if (scorer === 'player') {
     playerScore += 1
   } else {
@@ -522,11 +643,11 @@ const scorePoint = (scorer: 'player' | 'ai') => {
   scorePulseTimer = 0.4
   shakeTimer = 0.2
   shakeStrength = 13
-  spawnParticles(ball.x, ball.y, 22, 220, scorer === 'player' ? '255, 214, 155' : '125, 214, 255')
+  spawnParticles(scoringBall.x, scoringBall.y, 22, 220, scorer === 'player' ? '255, 214, 155' : '125, 214, 255')
 
   rallyCount = 0
 
-  if (playerScore >= TARGET_SCORE || aiScore >= TARGET_SCORE) {
+  if (playerScore >= targetScore || aiScore >= targetScore) {
     endMatch(playerScore > aiScore ? 'player' : 'ai')
     return
   }
@@ -550,6 +671,10 @@ const registerPaddleHit = () => {
   shakeTimer = 0.12
   shakeStrength = 8 + Math.min(7, rallyCount * 0.35)
   spawnParticles(ball.x, ball.y, 10 + Math.min(12, rallyCount), 160 + rallyCount * 5, currentCosmetic.trailColor)
+
+  if (activeModifier === 'Twin Orbit' && !orbitBallActive && rallyCount >= twinOrbitRallyThreshold && serveTimer <= 0) {
+    spawnOrbitBall()
+  }
 }
 
 const attachStickyBall = (paddle: Paddle) => {
@@ -558,58 +683,68 @@ const attachStickyBall = (paddle: Paddle) => {
   stickyOffsetY = clamp(ball.y - (paddle.y + paddle.height / 2), -paddle.height * 0.42, paddle.height * 0.42)
 }
 
-const applyPaddleCollision = (paddle: Paddle) => {
-  const withinX = ball.x + ball.radius > paddle.x && ball.x - ball.radius < paddle.x + paddle.width
-  const withinY = ball.y + ball.radius > paddle.y && ball.y - ball.radius < paddle.y + paddle.height
+const applyPaddleCollision = (targetBall: Ball, paddle: Paddle) => {
+  const withinX = targetBall.x + targetBall.radius > paddle.x && targetBall.x - targetBall.radius < paddle.x + paddle.width
+  const withinY = targetBall.y + targetBall.radius > paddle.y && targetBall.y - targetBall.radius < paddle.y + paddle.height
   if (!withinX || !withinY) return false
 
-  if (ball.vx < 0 && paddle === player) {
-    ball.x = paddle.x + paddle.width + ball.radius
-  } else if (ball.vx > 0 && paddle === ai) {
-    ball.x = paddle.x - ball.radius
+  if (targetBall.vx < 0 && paddle === player) {
+    targetBall.x = paddle.x + paddle.width + targetBall.radius
+  } else if (targetBall.vx > 0 && paddle === ai) {
+    targetBall.x = paddle.x - targetBall.radius
   } else {
     return false
   }
 
-  ball.vx *= -1
-  const offset = (ball.y - (paddle.y + paddle.height / 2)) / (paddle.height / 2)
-  ball.vy += offset * 250
-  ball.vx = clamp(ball.vx, -920, 920)
-  ball.vy = clamp(ball.vy, -920, 920)
+  targetBall.vx *= -1
+  const offset = (targetBall.y - (paddle.y + paddle.height / 2)) / (paddle.height / 2)
+  targetBall.vy += offset * 250
+  targetBall.vx = clamp(targetBall.vx, -920, 920)
+  targetBall.vy = clamp(targetBall.vy, -920, 920)
 
-  registerPaddleHit()
+  if (targetBall === ball) {
+    registerPaddleHit()
+  } else {
+    playPaddleHit(rallyCount, Math.hypot(targetBall.vx, targetBall.vy))
+    shakeTimer = 0.08
+    shakeStrength = 7
+    spawnParticles(targetBall.x, targetBall.y, 8, 150, currentCosmetic.trailColor)
+  }
 
-  if (activeModifier === 'Sticky Paddle') {
+  if (activeModifier === 'Sticky Paddle' && targetBall === ball) {
     attachStickyBall(paddle)
   }
 
   return true
 }
 
-const applyGravity = (dt: number) => {
+const applyGravity = (targetBall: Ball, dt: number) => {
   if (!gravityEnabled) return
 
   for (const well of gravityWells) {
-    const dx = well.x - ball.x
-    const dy = well.y - ball.y
+    const dx = well.x - targetBall.x
+    const dy = well.y - targetBall.y
     const dist2 = dx * dx + dy * dy
     const dist = Math.sqrt(dist2) || 1
     const dirX = dx / dist
     const dirY = dy / dist
     const force = well.strength / (dist2 + well.softening)
-    ball.vx += dirX * force * dt
-    ball.vy += dirY * force * dt
+    targetBall.vx += dirX * force * dt
+    targetBall.vy += dirY * force * dt
   }
 }
 
-const applyModifierForces = (dt: number) => {
-  modifierClock += dt
-
+const applyModifierForces = (targetBall: Ball, dt: number) => {
   if (activeModifier === 'Curve Drift') {
-    ball.vy += Math.sin(modifierClock * 5.4) * 70 * dt
+    targetBall.vy += Math.sin(modifierClock * 5.4) * 70 * dt
   } else if (activeModifier === 'Ion Wind') {
     const wind = Math.sin(modifierClock * 1.8) * 120
-    ball.vx += wind * dt
+    targetBall.vx += wind * dt
+  } else if (activeModifier === 'Gravity Pulse') {
+    const pulse = Math.sin(modifierClock * BALANCE.gravityPulse.frequency) * BALANCE.gravityPulse.force
+    const angle = modifierClock * BALANCE.gravityPulse.rotationSpeed
+    targetBall.vx += Math.cos(angle) * pulse * dt
+    targetBall.vy += Math.sin(angle * 1.17) * pulse * dt
   }
 }
 
@@ -643,18 +778,45 @@ const updatePlayer = (dt: number) => {
   player.y = clamp(player.y, 0, gameHeight - player.height)
 }
 
+const predictBallYForAI = (targetBall: Ball) => {
+  if (targetBall.vx <= 0) return targetBall.y
+
+  const distanceToAi = ai.x - (targetBall.x + targetBall.radius)
+  if (distanceToAi <= 0) return targetBall.y
+
+  const timeToAi = distanceToAi / Math.max(1, targetBall.vx)
+  const projectedY = targetBall.y + targetBall.vy * timeToAi
+  const period = gameHeight * 2
+  const wrapped = ((projectedY % period) + period) % period
+  return wrapped <= gameHeight ? wrapped : period - wrapped
+}
+
 const updateAI = (dt: number) => {
   aiReactionTimer -= dt * 1000
   if (aiReactionTimer <= 0) {
     aiReactionTimer = currentDifficulty.reactionMs
-    const error = (Math.random() * 2 - 1) * currentDifficulty.errorPx
-    aiTargetY = ball.y + error
+    const baseErrorScale = BALANCE.ai.errorScale[currentDifficulty.name]
+    const rallyErrorRamp = 1 + clamp(rallyCount * BALANCE.ai.rallyErrorPerHit, 0, BALANCE.ai.maxRallyErrorBoost)
+    const error = (Math.random() * 2 - 1) * currentDifficulty.errorPx * baseErrorScale * rallyErrorRamp
+
+    const incomingBalls = [ball, ...(orbitBallActive ? [orbitBall] : [])].filter((candidate) => candidate.vx > 0)
+    const trackingBall =
+      incomingBalls.length > 0
+        ? incomingBalls.reduce((frontMost, candidate) => (candidate.x > frontMost.x ? candidate : frontMost))
+        : ball
+
+    const targetY =
+      currentDifficulty.name === 'Easy' ? trackingBall.y : predictBallYForAI(trackingBall)
+    aiTargetY = targetY + error
   }
 
   const centerY = ai.y + ai.height / 2
   const distance = aiTargetY - centerY
-  const desiredSpeed = clamp(distance * 2.4, -currentDifficulty.maxSpeed, currentDifficulty.maxSpeed)
-  const smoothing = 1 - Math.exp(-dt * 8)
+  const speedBoostCap = BALANCE.ai.speedBoostCap[currentDifficulty.name]
+  const maxTrackingSpeed =
+    currentDifficulty.maxSpeed * (1 + clamp(rallyCount * BALANCE.ai.speedBoostPerHit, 0, speedBoostCap))
+  const desiredSpeed = clamp(distance * BALANCE.ai.trackingGain, -maxTrackingSpeed, maxTrackingSpeed)
+  const smoothing = 1 - Math.exp(-dt * BALANCE.ai.smoothing)
   aiVelocity += (desiredSpeed - aiVelocity) * smoothing
   ai.y += aiVelocity * dt
   ai.y = clamp(ai.y, 0, gameHeight - ai.height)
@@ -690,8 +852,8 @@ const updateBall = (dt: number) => {
     return
   }
 
-  applyGravity(dt)
-  applyModifierForces(dt)
+  applyGravity(ball, dt)
+  applyModifierForces(ball, dt)
 
   ball.x += ball.vx * dt
   ball.y += ball.vy * dt
@@ -706,14 +868,29 @@ const updateBall = (dt: number) => {
     spawnParticles(ball.x, ball.y, 8, 160, '196, 217, 255')
   }
 
-  if (!applyPaddleCollision(player)) {
-    applyPaddleCollision(ai)
+  if (!applyPaddleCollision(ball, player)) {
+    applyPaddleCollision(ball, ai)
+  }
+
+  if (activeModifier !== 'Twin Orbit') {
+    const rallySpeedRamp =
+      1 + dt * clamp(rallyCount * BALANCE.rallySpeedRamp.perHit, 0, BALANCE.rallySpeedRamp.maxRate)
+    ball.vx = clamp(
+      ball.vx * rallySpeedRamp,
+      -BALANCE.rallySpeedRamp.mainBallMaxSpeed,
+      BALANCE.rallySpeedRamp.mainBallMaxSpeed
+    )
+    ball.vy = clamp(
+      ball.vy * rallySpeedRamp,
+      -BALANCE.rallySpeedRamp.mainBallMaxSpeed,
+      BALANCE.rallySpeedRamp.mainBallMaxSpeed
+    )
   }
 
   if (ball.x + ball.radius < 0) {
-    scorePoint('ai')
+    scorePoint('ai', ball)
   } else if (ball.x - ball.radius > gameWidth) {
-    scorePoint('player')
+    scorePoint('player', ball)
   }
 
   const speed = Math.hypot(ball.vx, ball.vy)
@@ -721,6 +898,46 @@ const updateBall = (dt: number) => {
   trail.push({ x: ball.x, y: ball.y })
   while (trail.length > dynamicTrail) {
     trail.shift()
+  }
+}
+
+const updateOrbitBall = (dt: number) => {
+  if (!orbitBallActive || serveTimer > 0 || gameState !== 'playing') return
+
+  applyGravity(orbitBall, dt)
+  applyModifierForces(orbitBall, dt)
+
+  orbitBall.x += orbitBall.vx * dt
+  orbitBall.y += orbitBall.vy * dt
+
+  if (orbitBall.y - orbitBall.radius < 0) {
+    orbitBall.y = orbitBall.radius
+    orbitBall.vy = Math.abs(orbitBall.vy)
+    spawnParticles(orbitBall.x, orbitBall.y, 8, 160, '196, 217, 255')
+  } else if (orbitBall.y + orbitBall.radius > gameHeight) {
+    orbitBall.y = gameHeight - orbitBall.radius
+    orbitBall.vy = -Math.abs(orbitBall.vy)
+    spawnParticles(orbitBall.x, orbitBall.y, 8, 160, '196, 217, 255')
+  }
+
+  if (!applyPaddleCollision(orbitBall, player)) {
+    applyPaddleCollision(orbitBall, ai)
+  }
+
+  if (orbitBall.x + orbitBall.radius < 0) {
+    scorePoint('ai', orbitBall)
+    return
+  }
+  if (orbitBall.x - orbitBall.radius > gameWidth) {
+    scorePoint('player', orbitBall)
+    return
+  }
+
+  const speed = Math.hypot(orbitBall.vx, orbitBall.vy)
+  const dynamicTrail = Math.floor(7 + clamp(speed / 60, 0, 14) + clamp(rallyCount * 0.45, 0, 10))
+  orbitTrail.push({ x: orbitBall.x, y: orbitBall.y })
+  while (orbitTrail.length > dynamicTrail) {
+    orbitTrail.shift()
   }
 }
 
@@ -768,10 +985,26 @@ const renderTrail = () => {
 
   const speed = Math.hypot(ball.vx, ball.vy)
   const speedIntensity = clamp(speed / 980, 0.2, 1)
+  const ghostAlpha = getGhostBallAlpha()
   trail.forEach((point, index) => {
     const alpha = (index + 1) / trail.length
     const radius = ball.radius * (0.42 + alpha * 0.45)
-    ctx.fillStyle = `rgba(${currentCosmetic.trailColor}, ${alpha * 0.25 * speedIntensity})`
+    ctx.fillStyle = `rgba(${currentCosmetic.trailColor}, ${alpha * 0.25 * speedIntensity * ghostAlpha})`
+    ctx.beginPath()
+    ctx.arc(point.x, point.y, radius, 0, Math.PI * 2)
+    ctx.fill()
+  })
+}
+
+const renderOrbitTrail = () => {
+  if (!trailsEnabled || orbitTrail.length === 0 || !orbitBallActive) return
+
+  const speed = Math.hypot(orbitBall.vx, orbitBall.vy)
+  const speedIntensity = clamp(speed / 980, 0.18, 0.9)
+  orbitTrail.forEach((point, index) => {
+    const alpha = (index + 1) / orbitTrail.length
+    const radius = orbitBall.radius * (0.4 + alpha * 0.42)
+    ctx.fillStyle = `rgba(255, 192, 138, ${alpha * 0.22 * speedIntensity})`
     ctx.beginPath()
     ctx.arc(point.x, point.y, radius, 0, Math.PI * 2)
     ctx.fill()
@@ -795,7 +1028,30 @@ const renderPaddles = () => {
   ctx.fillRect(ai.x, ai.y, ai.width, ai.height)
 }
 
+const getGhostBallAlpha = () => {
+  if (activeModifier !== 'Ghost Ball') return 1
+
+  const cycle = BALANCE.ghostBall.cycle
+  const hidden = BALANCE.ghostBall.hiddenDuration
+  const fade = BALANCE.ghostBall.fadeDuration
+  const phase = modifierClock % cycle
+
+  if (phase < hidden) return BALANCE.ghostBall.minAlpha
+  if (phase < hidden + fade) {
+    const t = (phase - hidden) / fade
+    return BALANCE.ghostBall.minAlpha + (1 - BALANCE.ghostBall.minAlpha) * t
+  }
+  if (phase > cycle - fade) {
+    const t = (phase - (cycle - fade)) / fade
+    return 1 - (1 - BALANCE.ghostBall.minAlpha) * t
+  }
+  return 1
+}
+
 const renderBall = () => {
+  ctx.save()
+  ctx.globalAlpha = getGhostBallAlpha()
+
   const highlightX = ball.x - ball.radius * 0.35
   const highlightY = ball.y - ball.radius * 0.45
   const gradient = ctx.createRadialGradient(
@@ -818,6 +1074,35 @@ const renderBall = () => {
   ctx.fillStyle = 'rgba(255, 255, 255, 0.6)'
   ctx.beginPath()
   ctx.arc(highlightX, highlightY, ball.radius * 0.22, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.restore()
+}
+
+const renderOrbitBall = () => {
+  if (!orbitBallActive) return
+
+  const highlightX = orbitBall.x - orbitBall.radius * 0.35
+  const highlightY = orbitBall.y - orbitBall.radius * 0.45
+  const gradient = ctx.createRadialGradient(
+    highlightX,
+    highlightY,
+    orbitBall.radius * 0.4,
+    orbitBall.x,
+    orbitBall.y,
+    orbitBall.radius * 1.1
+  )
+  gradient.addColorStop(0, 'rgba(255, 255, 255, 1)')
+  gradient.addColorStop(0.45, 'rgba(255, 226, 198, 0.95)')
+  gradient.addColorStop(1, 'rgba(255, 153, 102, 0.9)')
+
+  ctx.fillStyle = gradient
+  ctx.beginPath()
+  ctx.arc(orbitBall.x, orbitBall.y, orbitBall.radius, 0, Math.PI * 2)
+  ctx.fill()
+
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.62)'
+  ctx.beginPath()
+  ctx.arc(highlightX, highlightY, orbitBall.radius * 0.22, 0, Math.PI * 2)
   ctx.fill()
 }
 
@@ -947,9 +1232,11 @@ const render = () => {
   renderBackground()
   renderWells()
   renderTrail()
+  renderOrbitTrail()
   renderParticles()
   renderPaddles()
   renderBall()
+  renderOrbitBall()
   renderScore()
   renderStatus()
   renderServe()
@@ -960,9 +1247,12 @@ const render = () => {
 
 const update = (dt: number) => {
   if (gameState === 'playing') {
+    modifierClock += dt
+    updateWellPositions()
     updatePlayer(dt)
     updateAI(dt)
     updateBall(dt)
+    updateOrbitBall(dt)
   } else if (gameState === 'splash') {
     ball.x = gameWidth / 2
     ball.y = gameHeight / 2
@@ -1011,12 +1301,20 @@ const loop = (time: number) => {
 }
 
 difficultySelect.value = currentDifficulty.name
+setupTargetScoreOptions()
+
 difficultySelect.addEventListener('change', () => {
   const next = difficultyPresets[difficultySelect.value]
   if (!next) return
   currentDifficulty = next
   aiTargetY = gameHeight / 2
   aiReactionTimer = 0
+})
+
+targetScoreSelect.addEventListener('change', () => {
+  const parsed = Number.parseInt(targetScoreSelect.value, 10)
+  targetScore = clampTargetScore(Number.isNaN(parsed) ? SCORE_LIMITS.default : parsed)
+  targetScoreSelect.value = String(targetScore)
 })
 
 muteToggle.addEventListener('change', () => {
@@ -1145,7 +1443,7 @@ if (rematchBtn) {
 }
 
 resize()
-resetBall(serveDirection)
+resetBall(ball, serveDirection)
 syncOverlayVisibility()
 updateHud()
 requestAnimationFrame(loop)
