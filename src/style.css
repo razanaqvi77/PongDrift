@@ -167,6 +167,11 @@ canvas {
   color: rgba(255, 255, 255, 0.62);
 }
 
+.modifier-description {
+  max-width: 230px;
+  line-height: 1.35;
+}
+
 .post-match {
   position: fixed;
   inset: 0;
