@@ -198,14 +198,14 @@ const BALANCE = {
   twinOrbitRallyThreshold: 3,
   difficulty: {
     Easy: { reactionMs: 180, maxSpeed: 380, errorPx: 40 },
-    Challenging: { reactionMs: 128, maxSpeed: 470, errorPx: 24 },
+    Challenging: { reactionMs: 140, maxSpeed: 440, errorPx: 28 },
     Hard: { reactionMs: 72, maxSpeed: 700, errorPx: 10 },
   },
   ai: {
-    errorScale: { Easy: 1, Challenging: 0.98, Hard: 0.65 },
+    errorScale: { Easy: 1, Challenging: 1.08, Hard: 0.65 },
     rallyErrorPerHit: 0.03,
     maxRallyErrorBoost: 0.5,
-    speedBoostCap: { Easy: 0, Challenging: 0.18, Hard: 0.28 },
+    speedBoostCap: { Easy: 0, Challenging: 0.09, Hard: 0.28 },
     speedBoostPerHit: 0.015,
     trackingGain: 2.8,
     smoothing: 8,
