@@ -40,6 +40,7 @@ type MatchModifier =
   | 'Drifting Wells'
   | 'Gravity Pulse'
   | 'Ghost Ball'
+type ModifierSelection = 'Random' | MatchModifier
 
 type Particle = {
   x: number
@@ -67,7 +68,7 @@ type Progression = {
 const SCORE_LIMITS = {
   min: 5,
   max: 20,
-  default: 10,
+  default: 5,
 }
 const PROGRESSION_KEY = 'pongdrift_progress_v1'
 const XP_PER_LEVEL = 140
@@ -96,6 +97,17 @@ const cosmetics: Cosmetic[] = [
   },
 ]
 
+const modifierDescriptions: Record<MatchModifier, string> = {
+  'Curve Drift': 'Periodic vertical force bends the ball path.',
+  'Big Ball': 'Larger ball radius increases collision chaos.',
+  'Sticky Paddle': 'Paddle contact briefly holds then releases the ball.',
+  'Ion Wind': 'Horizontal wind oscillation shifts ball velocity.',
+  'Twin Orbit': 'A second ball activates after sustained rallies.',
+  'Drifting Wells': 'Gravity wells drift across the arena over time.',
+  'Gravity Pulse': 'A rotating pulse force periodically shoves the ball.',
+  'Ghost Ball': 'The ball phases to low visibility in timed intervals.',
+}
+
 const app = document.querySelector<HTMLDivElement>('#app')
 if (!app) {
   throw new Error('App root not found')
@@ -123,14 +135,23 @@ app.innerHTML = `
     <label>
       Difficulty
       <select id="difficulty">
-        <option value="Easy">Easy</option>
-        <option value="Challenging" selected>Challenging</option>
+        <option value="Easy" selected>Easy</option>
+        <option value="Challenging">Challenging</option>
         <option value="Hard">Hard</option>
       </select>
     </label>
     <label>
+      Modifier
+      <select id="modifierMode"></select>
+    </label>
+    <div id="modifierDescription" class="hint modifier-description"></div>
+    <label>
       Target Score
       <select id="targetScore"></select>
+    </label>
+    <label class="toggle">
+      <input type="checkbox" id="speedRamp" checked />
+      Speed Ramp
     </label>
     <label class="toggle">
       <input type="checkbox" id="mute" />
@@ -146,7 +167,10 @@ app.innerHTML = `
 
 const canvas = document.querySelector<HTMLCanvasElement>('#game')
 const difficultySelect = document.querySelector<HTMLSelectElement>('#difficulty')
+const modifierModeSelect = document.querySelector<HTMLSelectElement>('#modifierMode')
+const modifierDescription = document.querySelector<HTMLDivElement>('#modifierDescription')
 const targetScoreSelect = document.querySelector<HTMLSelectElement>('#targetScore')
+const speedRampToggle = document.querySelector<HTMLInputElement>('#speedRamp')
 const muteToggle = document.querySelector<HTMLInputElement>('#mute')
 const trailsToggle = document.querySelector<HTMLInputElement>('#trails')
 const modifierBadge = document.querySelector<HTMLDivElement>('#modifierBadge')
@@ -162,7 +186,7 @@ const rematchBtn = document.querySelector<HTMLButtonElement>('#rematchBtn')
 const hud = document.querySelector<HTMLDivElement>('.hud')
 const settingsUi = document.querySelector<HTMLDivElement>('.ui')
 
-if (!canvas || !difficultySelect || !targetScoreSelect || !muteToggle || !trailsToggle) {
+if (!canvas || !difficultySelect || !modifierModeSelect || !modifierDescription || !targetScoreSelect || !speedRampToggle || !muteToggle || !trailsToggle) {
   throw new Error('Required UI elements are missing')
 }
 const ctx = canvas.getContext('2d')
@@ -174,11 +198,11 @@ const BALANCE = {
   twinOrbitRallyThreshold: 3,
   difficulty: {
     Easy: { reactionMs: 180, maxSpeed: 380, errorPx: 40 },
-    Challenging: { reactionMs: 96, maxSpeed: 590, errorPx: 16 },
-    Hard: { reactionMs: 62, maxSpeed: 760, errorPx: 8 },
+    Challenging: { reactionMs: 128, maxSpeed: 470, errorPx: 24 },
+    Hard: { reactionMs: 72, maxSpeed: 700, errorPx: 10 },
   },
   ai: {
-    errorScale: { Easy: 1, Challenging: 0.75, Hard: 0.55 },
+    errorScale: { Easy: 1, Challenging: 0.98, Hard: 0.65 },
     rallyErrorPerHit: 0.03,
     maxRallyErrorBoost: 0.5,
     speedBoostCap: { Easy: 0, Challenging: 0.18, Hard: 0.28 },
@@ -187,8 +211,8 @@ const BALANCE = {
     smoothing: 8,
   },
   rallySpeedRamp: {
-    perHit: 0.008,
-    maxRate: 0.04,
+    perHit: 0.0045,
+    maxRate: 0.022,
     mainBallMaxSpeed: 1100,
     orbitBallMaxSpeed: 1080,
   },
@@ -276,8 +300,10 @@ const gainXP = (amount: number) => {
   return { xp: progression.xp, level: afterLevel, unlocked }
 }
 
-let currentDifficulty = difficultyPresets.Challenging
+let currentDifficulty = difficultyPresets.Easy
+let selectedModifierMode: ModifierSelection = 'Random'
 let targetScore = SCORE_LIMITS.default
+let speedRampEnabled = true
 let trailsEnabled = true
 let gravityEnabled = true
 let activeModifier: MatchModifier = 'Curve Drift'
@@ -295,6 +321,41 @@ const setupTargetScoreOptions = () => {
     if (score === targetScore) option.selected = true
     targetScoreSelect.append(option)
   }
+}
+
+const ALL_MODIFIERS: MatchModifier[] = [
+  'Curve Drift',
+  'Big Ball',
+  'Sticky Paddle',
+  'Ion Wind',
+  'Twin Orbit',
+  'Drifting Wells',
+  'Gravity Pulse',
+  'Ghost Ball',
+]
+
+const setupModifierModeOptions = () => {
+  modifierModeSelect.innerHTML = ''
+  const randomOption = document.createElement('option')
+  randomOption.value = 'Random'
+  randomOption.textContent = 'Random'
+  modifierModeSelect.append(randomOption)
+
+  for (const modifier of ALL_MODIFIERS) {
+    const option = document.createElement('option')
+    option.value = modifier
+    option.textContent = modifier
+    modifierModeSelect.append(option)
+  }
+
+  modifierModeSelect.value = selectedModifierMode
+}
+
+const getSelectedModifierDescription = () => {
+  if (selectedModifierMode === 'Random') {
+    return `Random each round. Current: ${activeModifier} - ${modifierDescriptions[activeModifier]}`
+  }
+  return `${selectedModifierMode}: ${modifierDescriptions[selectedModifierMode]}`
 }
 
 const audioState = {
@@ -451,6 +512,7 @@ const syncOverlayVisibility = () => {
 
 const updateHud = () => {
   if (modifierBadge) modifierBadge.textContent = `Modifier: ${activeModifier}`
+  if (modifierDescription) modifierDescription.textContent = getSelectedModifierDescription()
   if (rallyMeter) {
     rallyMeter.textContent = `Rally ${rallyCount}`
     rallyMeter.style.transform = `scale(${1 + clamp(rallyPulseTimer * 0.45, 0, 0.3)})`
@@ -482,20 +544,19 @@ const spawnParticles = (x: number, y: number, count: number, speed: number, colo
 }
 
 const chooseModifier = (): MatchModifier => {
-  const modifiers: MatchModifier[] = [
-    'Curve Drift',
-    'Big Ball',
-    'Sticky Paddle',
-    'Ion Wind',
-    'Twin Orbit',
-    'Drifting Wells',
-    'Gravity Pulse',
-    'Ghost Ball',
-  ]
-  const filtered = modifiers.filter((modifier) => modifier !== lastModifier)
+  const filtered = ALL_MODIFIERS.filter((modifier) => modifier !== lastModifier)
   const picked = filtered[Math.floor(Math.random() * filtered.length)]
   lastModifier = picked
   return picked
+}
+
+const resolveModifierForRound = () => {
+  if (selectedModifierMode === 'Random') {
+    activeModifier = chooseModifier()
+  } else {
+    activeModifier = selectedModifierMode
+    lastModifier = activeModifier
+  }
 }
 
 const updateWellPositions = (clock = modifierClock) => {
@@ -589,7 +650,7 @@ const startMatch = () => {
   aiVelocity = 0
   scorePulseTimer = 0
   rallyPulseTimer = 0
-  activeModifier = chooseModifier()
+  resolveModifierForRound()
   applyModifierSetup()
   startServe(1)
   gameState = 'playing'
@@ -650,6 +711,12 @@ const scorePoint = (scorer: 'player' | 'ai', scoringBall: Ball) => {
   if (playerScore >= targetScore || aiScore >= targetScore) {
     endMatch(playerScore > aiScore ? 'player' : 'ai')
     return
+  }
+
+  if (selectedModifierMode === 'Random') {
+    resolveModifierForRound()
+    applyModifierSetup()
+    showToast(`New modifier: ${activeModifier}`)
   }
 
   startServe(scorer === 'player' ? -1 : 1)
@@ -872,7 +939,7 @@ const updateBall = (dt: number) => {
     applyPaddleCollision(ball, ai)
   }
 
-  if (activeModifier !== 'Twin Orbit') {
+  if (speedRampEnabled && activeModifier !== 'Twin Orbit') {
     const rallySpeedRamp =
       1 + dt * clamp(rallyCount * BALANCE.rallySpeedRamp.perHit, 0, BALANCE.rallySpeedRamp.maxRate)
     ball.vx = clamp(
@@ -1301,6 +1368,7 @@ const loop = (time: number) => {
 }
 
 difficultySelect.value = currentDifficulty.name
+setupModifierModeOptions()
 setupTargetScoreOptions()
 
 difficultySelect.addEventListener('change', () => {
@@ -1311,10 +1379,26 @@ difficultySelect.addEventListener('change', () => {
   aiReactionTimer = 0
 })
 
+modifierModeSelect.addEventListener('change', () => {
+  const nextSelection = modifierModeSelect.value as ModifierSelection
+  selectedModifierMode = nextSelection === 'Random' ? 'Random' : (nextSelection as MatchModifier)
+
+  if (gameState === 'playing' || gameState === 'paused') {
+    resolveModifierForRound()
+    applyModifierSetup()
+    showToast(`Modifier set: ${activeModifier}`)
+    updateHud()
+  }
+})
+
 targetScoreSelect.addEventListener('change', () => {
   const parsed = Number.parseInt(targetScoreSelect.value, 10)
   targetScore = clampTargetScore(Number.isNaN(parsed) ? SCORE_LIMITS.default : parsed)
   targetScoreSelect.value = String(targetScore)
+})
+
+speedRampToggle.addEventListener('change', () => {
+  speedRampEnabled = speedRampToggle.checked
 })
 
 muteToggle.addEventListener('change', () => {
